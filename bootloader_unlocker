@@ -20,8 +20,8 @@ function main {
 
   render_banner
   render_section "LINK" "verifying local fastboot and adb tools"
-  verify_host_dependencies
-  resolve_target_device "${CLI_DEVICE_OVERRIDE}"
+  verify_host_dependencies || exit "${EXIT_GENERAL_ERROR}"
+  resolve_target_device "${CLI_DEVICE_OVERRIDE}" || exit "${EXIT_GENERAL_ERROR}"
 
   # Resolve file paths
   TARGET_SAFE_ID=$(sanitize_device_identifier "${TARGET_DEVICE_ID}")
@@ -106,8 +106,10 @@ function main {
   function handle_exit_cleanup {
     local status_code=$?
     trap - EXIT INT TERM
-    save_device_state "${TARGET_STATE_FILE}"
-    printf "\n%s[INFO]%s Progress safely persisted to %s\n" "${COLOR_CYAN}" "${STYLE_RESET}" "${TARGET_STATE_FILE}"
+    if [[ -n "${TARGET_STATE_FILE:-}" && -n "${TARGET_DEVICE_ID:-}" ]]; then
+      save_device_state "${TARGET_STATE_FILE}"
+      printf "\n%s[INFO]%s Progress safely persisted to %s\n" "${COLOR_CYAN}" "${STYLE_RESET}" "${TARGET_STATE_FILE}"
+    fi
     exit "${status_code}"
   }
   trap handle_exit_cleanup EXIT INT TERM

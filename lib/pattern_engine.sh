@@ -26,7 +26,7 @@ function expand_pattern_mask {
       num_str=""
       while (( j < ${#pattern} )) && [[ "${pattern:j:1}" != "}" ]]; do
         num_str="${num_str}${pattern:j:1}"
-        (( j++ ))
+        j=$(( j + 1 ))
       done
       if [[ "${pattern:j:1}" == "}" && "${num_str}" =~ ^[0-9]+$ && "${num_str}" -gt 0 ]]; then
         count="${num_str}"
@@ -35,7 +35,7 @@ function expand_pattern_mask {
     fi
 
     output="${output}$(repeat_character "${char}" "${count}")"
-    (( i++ ))
+    i=$(( i + 1 ))
   done
 
   printf "%s" "${output}"

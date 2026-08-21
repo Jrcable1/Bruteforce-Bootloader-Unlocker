@@ -86,8 +86,10 @@ function display_runtime_summary {
 function execute_direct_command_flow {
   render_section "RUN" "dispatching direct unlock command"
   local output status
+  set +e
   output=$(dispatch_unlock_payload "")
   status=$?
+  set -e
 
   printf "%s\n" "${output}"
   if [[ ${status} -eq 0 ]] && ! is_fastboot_attempt_failure "${output}"; then
@@ -108,7 +110,7 @@ function fetch_next_candidate_code {
     CURRENT_PATTERN_MASK="X{${CONFIG_CODE_LENGTH}}"
     CURRENT_PATTERN_SPACE=$(calculate_pattern_space "X{${CONFIG_CODE_LENGTH}}" "${CONFIG_ACTIVE_CHARSET}")
     CURRENT_PATTERN_OFFSET="${STATE_GLOBAL_CURSOR}"
-    apply_known_positional_characters "${code}" "${CONFIG_KNOWN_POSITIONS}"
+    CURRENT_CANDIDATE_CODE=$(apply_known_positional_characters "${code}" "${CONFIG_KNOWN_POSITIONS}")
     return 0
   fi
 
@@ -142,7 +144,7 @@ function fetch_next_candidate_code {
   CURRENT_PATTERN_SPACE="${space}"
   CURRENT_PATTERN_OFFSET="${offset}"
 
-  apply_known_positional_characters "${code}" "${CONFIG_KNOWN_POSITIONS}"
+  CURRENT_CANDIDATE_CODE=$(apply_known_positional_characters "${code}" "${CONFIG_KNOWN_POSITIONS}")
 }
 
 function advance_runtime_cursor {
@@ -167,9 +169,12 @@ function execute_candidate_search_loop {
   start_time=$(date +%s)
 
   while true; do
-    candidate_code=$(fetch_next_candidate_code)
+    fetch_next_candidate_code
+    candidate_code="${CURRENT_CANDIDATE_CODE}"
+    set +e
     output=$(dispatch_unlock_payload "${candidate_code}")
     status=$?
+    set -e
 
     if is_terminal_fastboot_rejection "${output}"; then
       printf "\n"
@@ -188,7 +193,7 @@ function execute_candidate_search_loop {
       break
     fi
 
-    (( attempts++ ))
+    attempts=$(( attempts + 1 ))
     advance_runtime_cursor
 
     if (( attempts % DEFAULT_UPDATE_INTERVAL == 0 )); then

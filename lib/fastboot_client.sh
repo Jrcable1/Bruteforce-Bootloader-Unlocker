@@ -88,7 +88,7 @@ function resolve_target_device {
 }
 
 function run_fastboot_on_device {
-  "${ACTIVE_FASTBOOT_BIN}" -s "${TARGET_DEVICE_ID}" "$@" 2>&1 | tr -d '\r'
+  "${ACTIVE_FASTBOOT_BIN}" -s "${TARGET_DEVICE_ID}" "$@" 2>&1 | tr -d '\r' || true
 }
 
 function format_profile_label {

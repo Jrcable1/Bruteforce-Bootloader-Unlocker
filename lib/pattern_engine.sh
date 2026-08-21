@@ -133,18 +133,14 @@ function calculate_pattern_weight_total {
   printf "%s" "${total}"
 }
 
-function select_weighted_pattern_index {
-  local cursor=$1 raw_patterns=$2 total slot cumulative=0 i entry name mask weight desc
-  total=$(calculate_pattern_weight_total "${raw_patterns}")
-  if [[ "${total}" -le 0 ]]; then printf 0; return 0; fi
-  slot=$(( cursor % total ))
-
+function select_pattern_index_by_slot {
+  local target_slot=$1 raw_patterns=$2 cumulative=0 i entry name mask weight desc
   IFS=';' read -ra entries <<< "${raw_patterns}"
   for (( i=0; i<${#entries[@]}; i++ )); do
     IFS=':' read -r name mask weight desc <<< "${entries[$i]}"
     if [[ ! "${weight}" =~ ^[0-9]+$ || "${weight}" -le 0 ]]; then weight=1; fi
     cumulative=$(( cumulative + weight ))
-    if (( slot < cumulative )); then
+    if (( target_slot < cumulative )); then
       printf "%s" "${i}"
       return 0
     fi
@@ -152,21 +148,18 @@ function select_weighted_pattern_index {
   printf 0
 }
 
-function select_random_pattern_index {
-  local raw_patterns=$1 total slot cumulative=0 i entry name mask weight desc
+function select_weighted_pattern_index {
+  local cursor=$1 raw_patterns=$2 total slot
   total=$(calculate_pattern_weight_total "${raw_patterns}")
-  if [[ "${total}" -le 0 ]]; then printf 0; return 0; fi
-  slot=$(( RANDOM % total ))
+  [[ "${total}" -le 0 ]] && { printf 0; return 0; }
+  slot=$(( cursor % total ))
+  select_pattern_index_by_slot "${slot}" "${raw_patterns}"
+}
 
-  IFS=';' read -ra entries <<< "${raw_patterns}"
-  for (( i=0; i<${#entries[@]}; i++ )); do
-    IFS=':' read -r name mask weight desc <<< "${entries[$i]}"
-    if [[ ! "${weight}" =~ ^[0-9]+$ || "${weight}" -le 0 ]]; then weight=1; fi
-    cumulative=$(( cumulative + weight ))
-    if (( slot < cumulative )); then
-      printf "%s" "${i}"
-      return 0
-    fi
-  done
-  printf 0
+function select_random_pattern_index {
+  local raw_patterns=$1 total slot
+  total=$(calculate_pattern_weight_total "${raw_patterns}")
+  [[ "${total}" -le 0 ]] && { printf 0; return 0; }
+  slot=$(( RANDOM % total ))
+  select_pattern_index_by_slot "${slot}" "${raw_patterns}"
 }

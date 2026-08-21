@@ -1,835 +1,127 @@
-#!/bin/bash
-clear
+#!/usr/bin/env bash
+# ==============================================================================
+# Fastboot Bootloader Unlock Console
+# ==============================================================================
+set -euo pipefail
 
-# ---------------- TERMINAL UI ----------------
-if [[ -t 1 && -z "${NO_COLOR}" ]]; then
-  BOLD='\033[1m'
-  DIM='\033[2m'
-  RED='\033[31m'
-  GREEN='\033[32m'
-  YELLOW='\033[33m'
-  BLUE='\033[34m'
-  CYAN='\033[36m'
-  RESET='\033[0m'
-else
-  BOLD=''
-  DIM=''
-  RED=''
-  GREEN=''
-  YELLOW=''
-  BLUE=''
-  CYAN=''
-  RESET=''
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-function banner {
-  echo -e "${CYAN}${BOLD}FASTBOOT UNLOCK CONSOLE${RESET}"
-  echo -e "${DIM}scope: authorized devices only | transport: fastboot | mode: pattern search${RESET}"
-  echo "------------------------------------------------------------"
-}
+# Load modular subsystems
+source "${SCRIPT_DIR}/lib/constants.sh"
+source "${SCRIPT_DIR}/lib/terminal_ui.sh"
+source "${SCRIPT_DIR}/lib/device_storage.sh"
+source "${SCRIPT_DIR}/lib/pattern_engine.sh"
+source "${SCRIPT_DIR}/lib/fastboot_client.sh"
+source "${SCRIPT_DIR}/lib/argument_parser.sh"
+source "${SCRIPT_DIR}/lib/unlock_runner.sh"
 
-function section {
-  echo ""
-  echo -e "${BLUE}${BOLD}[$1]${RESET} $2"
-}
+function main {
+  parse_cli_arguments "$@"
 
-function ok { echo -e "${GREEN}[OK]${RESET} $1"; }
-function warn { echo -e "${YELLOW}[WARN]${RESET} $1"; }
-function fail { echo -e "${RED}[ERR]${RESET} $1"; }
+  render_banner
+  render_section "LINK" "verifying local fastboot and adb tools"
+  verify_host_dependencies
+  resolve_target_device "${CLI_DEVICE_OVERRIDE}"
 
-# ---------------- CONFIGURATION ----------------
-DEFAULT_CODE_LENGTH=20
-DEFAULT_STRATEGY="smart"
-DEFAULT_COMMAND_PROFILE="auto"
-FASTBOOT_BIN=${FASTBOOT_BIN:-fastboot}
-MAX_INT=9223372036854775807
+  # Resolve file paths
+  TARGET_SAFE_ID=$(sanitize_device_identifier "${TARGET_DEVICE_ID}")
+  TARGET_STATE_FILE=$(resolve_state_file_path "${TARGET_SAFE_ID}")
+  TARGET_SUCCESS_FILE=$(resolve_success_file_path "${TARGET_SAFE_ID}")
 
-DIGITS='0123456789'
-UPPER='ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-LOWER='abcdefghijklmnopqrstuvwxyz'
-UPPER_ALNUM='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-MIXED_ALNUM='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-HEX_UPPER='0123456789ABCDEF'
-HEX_LOWER='0123456789abcdef'
+  # Load previous state if available
+  load_device_state "${TARGET_STATE_FILE}"
 
-# Weighted from most useful / most commonly reported fastboot-like flows to broader guesses.
-# Format: name:mask:weight:note
-BUILTIN_PATTERNS="motorola-portal-20:X{20}:10:Motorola portal unlock keys are commonly reported as 20 uppercase alphanumeric chars;motorola-last-digit:A{19}9:6:Observed Motorola-like 20-char key with final digit;motorola-pos5-digit:A{4}9A{15}:5:Observed Motorola-like 20-char key with digit at position 5;hex-16:H{16}:3:Common token/key style;hex-32:H{32}:2:Long hex token/key style;numeric-8:9{8}:2:Short numeric service-code style;numeric-6:9{6}:1:Short numeric fallback"
+  # Merge configuration with priority: CLI flags > stored state > system defaults
+  CONFIG_CODE_TYPE="${CLI_CODE_TYPE:-${STORED_CODE_TYPE:-${DEFAULT_CODE_TYPE}}}"
+  CONFIG_CODE_LENGTH="${CLI_CODE_LENGTH:-${STORED_CODE_LENGTH:-${DEFAULT_CODE_LENGTH}}}"
+  CONFIG_STRATEGY="${CLI_STRATEGY:-${STORED_STRATEGY:-${DEFAULT_STRATEGY}}}"
+  CONFIG_COMMAND_PROFILE="${CLI_COMMAND_PROFILE:-${STORED_COMMAND_PROFILE:-${DEFAULT_COMMAND_PROFILE}}}"
+  CONFIG_KNOWN_POSITIONS="${STORED_KNOWN_POSITIONS:-}"
+  STATE_GLOBAL_CURSOR="${CLI_START_OFFSET:-${STORED_LAST_VALUE:-0}}"
+  STATE_PATTERN_OFFSETS="${STORED_PATTERN_OFFSETS:-}"
 
-# ---------------- HELP ----------------
-function show_help {
-  cat <<EOF
-Bootloader Unlocker - fastboot command profiles + pattern DSL
+  # Resolve Active Charset
+  case "${CONFIG_CODE_TYPE}" in
+    numeric) CONFIG_ACTIVE_CHARSET="${CHARSET_DIGITS}" ;;
+    alpha|moto) CONFIG_ACTIVE_CHARSET="${CHARSET_UPPER_ALPHANUMERIC}" ;;
+    *)
+      ui_fail "Invalid code type '${CONFIG_CODE_TYPE}'. Valid types: numeric, alpha, moto."
+      exit "${EXIT_GENERAL_ERROR}"
+      ;;
+  esac
 
-Usage: $0 [options]
-
-Options:
-  -h, --help                 Show this help message
-  -d, --device <id>          Specify fastboot device ID (default: auto-detect)
-  -t, --type <type>          Code type: numeric, alpha, moto (legacy shortcut)
-  -l, --length <num>         Code length for legacy generic search
-  -s, --start <value>        Start from numeric offset
-  -p, --pattern <mask>       Use one DSL mask, e.g. 'X{20}', 'A{19}9', '999999'
-  --patterns <list>          Semicolon list: name:mask:weight;name:mask:weight
-  --strategy <strategy>      sequential, random, smart (default: smart)
-  --command <profile>        auto, flashing-unlock, flashing-unlock-code,
-                             oem-unlock-code, oem-unlock, oem-unlock-go
-  --list-patterns            Show built-in pattern DSL masks
-
-Pattern DSL:
-  9  digit              0-9
-  A  uppercase letter   A-Z
-  a  lowercase letter   a-z
-  X  uppercase alnum    A-Z0-9
-  x  mixed alnum        A-Za-z0-9
-  H  uppercase hex      0-9A-F
-  h  lowercase hex      0-9a-f
-  ?  active charset     selected by --type
-  {n} repeats previous token, e.g. A{4}9A{15}
-  Other chars are literals, useful for separators like XXXX-XXXX
-
-Examples:
-  $0 --command auto --strategy smart
-  $0 --pattern 'X{20}' --command oem-unlock-code
-  $0 --patterns 'moto:X{20}:10;pin6:9{6}:1'
-EOF
-  exit 0
-}
-
-function list_patterns {
-  echo "Built-in patterns, highest priority first:"
-  IFS=';' read -ra entries <<< "${BUILTIN_PATTERNS}"
-  for entry in "${entries[@]}"; do
-    IFS=':' read -r name mask weight note <<< "${entry}"
-    printf "  %-22s mask=%-12s weight=%s  %s\n" "${name}" "${mask}" "${weight}" "${note}"
-  done
-  exit 0
-}
-
-# ---------------- PRE-FLIGHT CHECKS ----------------
-function check_dependencies {
-  if ! command -v "${FASTBOOT_BIN}" >/dev/null 2>&1; then
-    if [[ "${FASTBOOT_BIN}" == "fastboot" ]] && command -v fastboot.exe >/dev/null 2>&1; then
-      FASTBOOT_BIN="fastboot.exe"
-    else
-      fail "fastboot not found in PATH. Install Android SDK Platform Tools."
-      echo "Linux: sudo apt-get install android-tools-fastboot"
-      echo "Windows + WSL: add platform-tools to Windows PATH, or set FASTBOOT_BIN=/path/to/fastboot.exe."
-      exit 1
-    fi
-  fi
-
-  local fb_version
-  fb_version=$("${FASTBOOT_BIN}" --version 2>/dev/null | sed -n '1p')
-  ok "fastboot found (${FASTBOOT_BIN}): ${fb_version:-unknown version}"
-
-  if command -v adb >/dev/null 2>&1; then
-    ok "adb found: $(adb --version 2>/dev/null | sed -n '1p')"
+  # Resolve Patterns
+  if [[ -n "${CLI_PATTERN_SCHEDULE}" ]]; then
+    CONFIG_PATTERNS="${CLI_PATTERN_SCHEDULE}"
+  elif [[ -n "${CLI_SINGLE_PATTERN}" ]]; then
+    CONFIG_PATTERNS="custom:${CLI_SINGLE_PATTERN}:10:User custom mask"
+  elif [[ -n "${STORED_PATTERNS:-}" ]]; then
+    CONFIG_PATTERNS="${STORED_PATTERNS}"
+  elif [[ "${CONFIG_CODE_TYPE}" == "moto" ]]; then
+    CONFIG_PATTERNS="${BUILTIN_PATTERN_PROFILES}"
   else
-    warn "adb not found. Not required for brute-force loop; useful for 'adb reboot bootloader'."
-  fi
-}
-
-function detect_device {
-  local lines count first
-
-  if [[ -n "${manual_device}" ]]; then
-    device="${manual_device}"
-  else
-    lines=$("${FASTBOOT_BIN}" devices 2>/dev/null | awk 'NF >= 2 {print $1}')
-    count=$(printf "%s\n" "${lines}" | grep -c .)
-    first=$(printf "%s\n" "${lines}" | sed -n '1p')
-
-    if [[ "${count}" -eq 0 ]]; then
-      fail "No device detected in fastboot mode. Hard stop."
-      echo "Put device in bootloader/fastboot mode, then re-run."
-      echo "Common path: enable OEM unlocking, connect USB, run 'adb reboot bootloader'."
-      exit 1
-    fi
-
-    if [[ "${count}" -gt 1 ]]; then
-      fail "Multiple "${FASTBOOT_BIN}" devices detected. Pass --device <id>."
-      "${FASTBOOT_BIN}" devices
-      exit 1
-    fi
-
-    device="${first}"
+    CONFIG_PATTERNS=""
   fi
 
-  if ! "${FASTBOOT_BIN}" -s "${device}" devices 2>/dev/null | awk '{print $1}' | grep -Fxq "${device}"; then
-    fail "Device '${device}' not present in fastboot output."
-    exit 1
-  fi
-
-  safe_device=$(printf "%s" "${device}" | tr -c 'A-Za-z0-9._-' '_')
-  devfile="./${safe_device}.dat"
-  success_file="./SUCCESS_${safe_device}.txt"
-  ok "Device: ${device}"
-}
-
-# ---------------- DEVICE DATA ----------------
-function read_devfile {
-  declare -g code_type code_length last_value charset strategy known_positions command_profile patterns pattern_offsets resolved_command
-  if [[ -f "${devfile}" ]]; then
-    while IFS='=' read -r key value; do
-      case "${key}" in
-        code_type) code_type="${value}" ;;
-        code_length) code_length="${value}" ;;
-        last_value) last_value="${value}" ;;
-        charset) charset="${value}" ;;
-        strategy) strategy="${value}" ;;
-        known_positions) known_positions="${value}" ;;
-        command_profile) command_profile="${value}" ;;
-        patterns) patterns="${value}" ;;
-        pattern_offsets) pattern_offsets="${value}" ;;
-        resolved_command) resolved_command="${value}" ;;
-      esac
-    done < "${devfile}"
-  fi
-}
-
-function write_devfile {
-  {
-    echo "code_type=${code_type}"
-    echo "code_length=${code_length}"
-    echo "last_value=${last_value}"
-    echo "charset=${charset}"
-    echo "strategy=${strategy}"
-    echo "known_positions=${known_positions}"
-    echo "command_profile=${command_profile}"
-    echo "patterns=${patterns}"
-    echo "pattern_offsets=${pattern_offsets}"
-    echo "resolved_command=${resolved_command}"
-  } > "${devfile}"
-}
-
-# ---------------- PATTERN DSL ----------------
-function repeat_char {
-  local ch=$1 count=$2 out="" i
-  for (( i=0; i<count; i++ )); do
-    out="${out}${ch}"
-  done
-  printf "%s" "${out}"
-}
-
-function expand_pattern {
-  local pattern=$1 out="" i=0 ch count j num
-
-  while (( i < ${#pattern} )); do
-    ch="${pattern:i:1}"
-    count=1
-
-    if [[ "${pattern:i+1:1}" == "{" ]]; then
-      j=$((i + 2))
-      num=""
-      while (( j < ${#pattern} )) && [[ "${pattern:j:1}" != "}" ]]; do
-        num="${num}${pattern:j:1}"
-        ((j++))
-      done
-      if [[ "${pattern:j:1}" == "}" && "${num}" =~ ^[0-9]+$ && "${num}" -gt 0 ]]; then
-        count="${num}"
-        i="${j}"
+  # Validate pattern masks
+  if [[ -n "${CONFIG_PATTERNS}" ]]; then
+    IFS=';' read -ra entries <<< "${CONFIG_PATTERNS}"
+    for entry in "${entries[@]}"; do
+      IFS=':' read -r name mask weight desc <<< "${entry}"
+      if ! validate_pattern_mask "${mask}"; then
+        ui_fail "Invalid pattern syntax in mask '${mask}' (entry: '${entry}')"
+        exit "${EXIT_GENERAL_ERROR}"
       fi
-    fi
-
-    out="${out}$(repeat_char "${ch}" "${count}")"
-    ((i++))
-  done
-
-  printf "%s" "${out}"
-}
-
-function charset_for_symbol {
-  local symbol=$1
-  case "${symbol}" in
-    9) printf "%s" "${DIGITS}" ;;
-    A) printf "%s" "${UPPER}" ;;
-    a) printf "%s" "${LOWER}" ;;
-    X) printf "%s" "${UPPER_ALNUM}" ;;
-    x) printf "%s" "${MIXED_ALNUM}" ;;
-    H) printf "%s" "${HEX_UPPER}" ;;
-    h) printf "%s" "${HEX_LOWER}" ;;
-    \?) printf "%s" "${charset}" ;;
-    *) printf "%s" "${symbol}" ;;
-  esac
-}
-
-function validate_pattern {
-  local mask=$1 expanded
-  expanded=$(expand_pattern "${mask}")
-  if [[ -z "${expanded}" ]]; then
-    return 1
-  fi
-  return 0
-}
-
-function pattern_space {
-  local mask=$1 expanded i symbol cs base total=1
-  expanded=$(expand_pattern "${mask}")
-
-  for (( i=0; i<${#expanded}; i++ )); do
-    symbol="${expanded:i:1}"
-    cs=$(charset_for_symbol "${symbol}")
-    base=${#cs}
-    if (( total > MAX_INT / base )); then
-      echo "huge"
-      return
-    fi
-    total=$(( total * base ))
-  done
-
-  echo "${total}"
-}
-
-function pattern_to_code {
-  local offset=$1 mask=$2 expanded result="" i symbol cs base index ch
-  expanded=$(expand_pattern "${mask}")
-
-  for (( i=${#expanded}-1; i>=0; i-- )); do
-    symbol="${expanded:i:1}"
-    cs=$(charset_for_symbol "${symbol}")
-    base=${#cs}
-    if (( base <= 1 )); then
-      ch="${cs}"
-    else
-      index=$(( offset % base ))
-      ch="${cs:index:1}"
-      offset=$(( offset / base ))
-    fi
-    result="${ch}${result}"
-  done
-
-  apply_known_positions "${result}"
-}
-
-function apply_known_positions {
-  local code=$1 temp_code pos char
-  temp_code="${code}"
-
-  if [[ -n "${known_positions}" ]]; then
-    while IFS=':' read -r pos char; do
-      if [[ "${pos}" =~ ^[0-9]+$ && -n "${char}" && ${#char} -eq 1 && "${pos}" -lt ${#temp_code} ]]; then
-        temp_code="${temp_code:0:${pos}}${char}${temp_code:$((pos+1))}"
-      fi
-    done <<< "${known_positions//;/$'\n'}"
-  fi
-
-  echo "${temp_code}"
-}
-
-function split_patterns {
-  IFS=';' read -ra pattern_entries <<< "${patterns}"
-}
-
-function ensure_pattern_offsets {
-  split_patterns
-  IFS=',' read -ra offsets <<< "${pattern_offsets}"
-  local changed=0 i
-
-  for (( i=0; i<${#pattern_entries[@]}; i++ )); do
-    if [[ -z "${offsets[$i]}" || ! "${offsets[$i]}" =~ ^[0-9]+$ ]]; then
-      offsets[$i]=0
-      changed=1
-    fi
-  done
-
-  if (( changed )) || [[ -z "${pattern_offsets}" ]]; then
-    join_pattern_offsets
-  fi
-}
-
-function join_pattern_offsets {
-  local out="" i
-  for (( i=0; i<${#pattern_entries[@]}; i++ )); do
-    if [[ $i -gt 0 ]]; then out="${out},"; fi
-    out="${out}${offsets[$i]:-0}"
-  done
-  pattern_offsets="${out}"
-}
-
-function pattern_weight_total {
-  local total=0 entry name mask weight note
-  split_patterns
-  for entry in "${pattern_entries[@]}"; do
-    IFS=':' read -r name mask weight note <<< "${entry}"
-    if [[ ! "${weight}" =~ ^[0-9]+$ || "${weight}" -le 0 ]]; then weight=1; fi
-    total=$((total + weight))
-  done
-  echo "${total}"
-}
-
-function weighted_pattern_index {
-  local cursor=$1 total slot cumulative=0 i entry name mask weight note
-  total=$(pattern_weight_total)
-  if [[ "${total}" -le 0 ]]; then echo 0; return; fi
-  slot=$(( cursor % total ))
-
-  split_patterns
-  for (( i=0; i<${#pattern_entries[@]}; i++ )); do
-    IFS=':' read -r name mask weight note <<< "${pattern_entries[$i]}"
-    if [[ ! "${weight}" =~ ^[0-9]+$ || "${weight}" -le 0 ]]; then weight=1; fi
-    cumulative=$(( cumulative + weight ))
-    if (( slot < cumulative )); then
-      echo "${i}"
-      return
-    fi
-  done
-
-  echo 0
-}
-
-function random_pattern_index {
-  local total slot cumulative=0 i entry name mask weight note
-  total=$(pattern_weight_total)
-  if [[ "${total}" -le 0 ]]; then echo 0; return; fi
-  slot=$(( RANDOM % total ))
-
-  split_patterns
-  for (( i=0; i<${#pattern_entries[@]}; i++ )); do
-    IFS=':' read -r name mask weight note <<< "${pattern_entries[$i]}"
-    if [[ ! "${weight}" =~ ^[0-9]+$ || "${weight}" -le 0 ]]; then weight=1; fi
-    cumulative=$(( cumulative + weight ))
-    if (( slot < cumulative )); then
-      echo "${i}"
-      return
-    fi
-  done
-
-  echo 0
-}
-
-function next_pattern_code {
-  local idx entry name mask weight note offset space
-  ensure_pattern_offsets
-
-  case "${strategy}" in
-    random)
-      idx=$(random_pattern_index)
-      ;;
-    sequential)
-      idx=0
-      ;;
-    *)
-      idx=$(weighted_pattern_index "${last_value}")
-      ;;
-  esac
-
-  entry="${pattern_entries[$idx]}"
-  IFS=':' read -r name mask weight note <<< "${entry}"
-  offset="${offsets[$idx]:-0}"
-  space=$(pattern_space "${mask}")
-
-  if [[ "${space}" != "huge" && "${space}" -gt 0 && "${offset}" -ge "${space}" ]]; then
-    offsets[$idx]=0
-    offset=0
-  fi
-
-  selected_pattern_index="${idx}"
-  selected_pattern_name="${name}"
-  selected_pattern_mask="${mask}"
-  selected_pattern_space="${space}"
-  selected_pattern_offset="${offset}"
-
-  pattern_to_code "${offset}" "${mask}"
-}
-
-function advance_pattern_offset {
-  if [[ -n "${selected_pattern_index}" ]]; then
-    offsets[$selected_pattern_index]=$(( ${offsets[$selected_pattern_index]:-0} + 1 ))
-    join_pattern_offsets
-  fi
-}
-
-# ---------------- LEGACY GENERATORS ----------------
-function number_to_code {
-  local num=$1 length=$2 base=${#charset} code='' index
-  while [[ ${#code} -lt ${length} ]]; do
-    index=$(( num % base ))
-    code="${charset:index:1}${code}"
-    num=$(( num / base ))
-  done
-  apply_known_positions "${code}"
-}
-
-function generate_random_code {
-  local length=$1 code="" base=${#charset} i index
-  for (( i=0; i<length; i++ )); do
-    index=$(( RANDOM % base ))
-    code="${code}${charset:index:1}"
-  done
-  apply_known_positions "${code}"
-}
-
-function next_code {
-  if [[ -n "${patterns}" ]]; then
-    next_pattern_code
-    return
-  fi
-
-  selected_pattern_name="generic"
-  selected_pattern_mask="${code_type}:${code_length}"
-  case "${strategy}" in
-    random) generate_random_code "${code_length}" ;;
-    *) number_to_code "${last_value}" "${code_length}" ;;
-  esac
-}
-
-# ---------------- COMMAND PROFILE DETECTION ----------------
-function fastboot_device {
-  "${FASTBOOT_BIN}" -s "${device}" "$@"
-}
-
-function command_needs_code {
-  case "${resolved_command}" in
-    flashing-unlock|oem-unlock|oem-unlock-go) return 1 ;;
-    *) return 0 ;;
-  esac
-}
-
-function command_label {
-  case "${resolved_command}" in
-    flashing-unlock) echo "fastboot flashing unlock" ;;
-    flashing-unlock-code) echo "fastboot flashing unlock <code>" ;;
-    oem-unlock-code) echo "fastboot oem unlock <code>" ;;
-    oem-unlock) echo "fastboot oem unlock" ;;
-    oem-unlock-go) echo "fastboot oem unlock-go" ;;
-    *) echo "unknown" ;;
-  esac
-}
-
-function detect_unlock_command {
-  local requested=$1 ability unlock_data product
-
-  case "${requested}" in
-    flashing-unlock|flashing-unlock-code|oem-unlock-code|oem-unlock|oem-unlock-go)
-      resolved_command="${requested}"
-      ok "Command profile: $(command_label) (manual)"
-      return
-      ;;
-    auto|"") ;;
-    *)
-      fail "Invalid command profile: ${requested}"
-      exit 1
-      ;;
-  esac
-
-  section "PROFILE" "autodetecting safe fastboot unlock flow"
-
-  ability=$(fastboot_device flashing get_unlock_ability 2>&1 || true)
-  if echo "${ability}" | grep -Eq '(^|[^0-9])1([^0-9]|$)'; then
-    resolved_command="flashing-unlock"
-    ok "AOSP unlock ability = 1. Selected: $(command_label)"
-    return
-  fi
-
-  unlock_data=$(fastboot_device oem get_unlock_data 2>&1 || true)
-  if echo "${unlock_data}" | grep -Eiq 'unlock data|bootloader|INFO|Motorola|token'; then
-    if ! echo "${unlock_data}" | grep -Eiq 'unknown command|not supported|FAILED|remote failure'; then
-      resolved_command="oem-unlock-code"
-      ok "OEM unlock-data command responded. Selected: $(command_label)"
-      return
-    fi
-  fi
-
-  product=$(fastboot_device getvar product 2>&1 || true)
-  if echo "${product}" | grep -Eiq 'pixel|google'; then
-    resolved_command="flashing-unlock"
-    ok "Google/Pixel-like product. Selected: $(command_label)"
-    return
-  fi
-
-  resolved_command="oem-unlock-code"
-  warn "Could not prove no-code AOSP unlock support. Selected conservative code flow: $(command_label)"
-}
-
-function run_unlock_command {
-  local code=$1
-  case "${resolved_command}" in
-    flashing-unlock)
-      fastboot_device flashing unlock 2>&1
-      ;;
-    flashing-unlock-code)
-      fastboot_device flashing unlock "${code}" 2>&1
-      ;;
-    oem-unlock-code)
-      fastboot_device oem unlock "${code}" 2>&1
-      ;;
-    oem-unlock)
-      fastboot_device oem unlock 2>&1
-      ;;
-    oem-unlock-go)
-      fastboot_device oem unlock-go 2>&1
-      ;;
-    *)
-      echo "Invalid command profile: ${resolved_command}"
-      return 2
-      ;;
-  esac
-}
-
-function is_terminal_fastboot_error {
-  echo "$1" | grep -Eiq 'unknown command|not supported|not allowed|unlock ability is 0|unlock_ability.*0|oem unlock is not allowed|flashing unlock is not allowed|permission denied|device is locked by carrier|carrier|frp|not unlockable'
-}
-
-function is_fastboot_failure {
-  echo "$1" | grep -Eiq 'fail|failed|failure|error|invalid|denied|wrong|incorrect|not match|mismatch|remote:'
-}
-
-function try_unlock {
-  local code=$1 status
-  output=$(run_unlock_command "${code}")
-  status=$?
-
-  if is_terminal_fastboot_error "${output}"; then
-    echo "${output}"
-    return 2
-  fi
-
-  if [[ ${status} -eq 0 ]] && ! is_fastboot_failure "${output}"; then
-    return 0
-  fi
-
-  return 1
-}
-
-# ---------------- PROGRESS ----------------
-function safe_total_combinations {
-  local base=$1 length=$2 total=1 i
-  for (( i=0; i<length; i++ )); do
-    if (( total > MAX_INT / base )); then
-      echo "huge"
-      return
-    fi
-    total=$(( total * base ))
-  done
-  echo "${total}"
-}
-
-function percent_x1000 {
-  local current=$1 total=$2
-  if [[ "${total}" == "huge" || "${total}" -le 0 ]]; then
-    echo "n/a"
-    return
-  fi
-  printf "%d.%03d" $(( current * 100 / total )) $(( current * 100000 / total % 1000 ))
-}
-
-function estimate_time {
-  local current=$1 total=$2 elapsed=$3 rate remaining days hours minutes seconds
-
-  if [[ "${total}" == "huge" || ${current} -le 0 || ${elapsed} -le 0 ]]; then
-    echo "Unknown"
-    return
-  fi
-
-  rate=$(( current / elapsed ))
-  if [[ ${rate} -le 0 ]]; then
-    echo "Unknown"
-    return
-  fi
-
-  remaining=$(( (total - current) / rate ))
-  days=$(( remaining / 86400 ))
-  hours=$(( (remaining % 86400) / 3600 ))
-  minutes=$(( (remaining % 3600) / 60 ))
-  seconds=$(( remaining % 60 ))
-
-  if [[ ${days} -gt 0 ]]; then
-    echo "${days}d ${hours}h ${minutes}m ${seconds}s"
-  elif [[ ${hours} -gt 0 ]]; then
-    echo "${hours}h ${minutes}m ${seconds}s"
-  elif [[ ${minutes} -gt 0 ]]; then
-    echo "${minutes}m ${seconds}s"
-  else
-    echo "${seconds}s"
-  fi
-}
-
-# ---------------- ARGUMENTS ----------------
-while [[ $# -gt 0 ]]; do
-  key="$1"
-  case ${key} in
-    -h|--help) show_help ;;
-    --list-patterns) list_patterns ;;
-    -d|--device) manual_device="$2"; shift 2 ;;
-    -t|--type) arg_code_type="$2"; shift 2 ;;
-    -l|--length) arg_code_length="$2"; shift 2 ;;
-    -s|--start) arg_start_code="$2"; shift 2 ;;
-    -p|--pattern) arg_pattern="$2"; shift 2 ;;
-    --patterns) arg_patterns="$2"; shift 2 ;;
-    --strategy) arg_strategy="$2"; shift 2 ;;
-    --command) arg_command_profile="$2"; shift 2 ;;
-    *) fail "Unknown option: $1"; show_help ;;
-  esac
-done
-
-banner
-section "LINK" "checking local tools and fastboot transport"
-check_dependencies
-detect_device
-
-# ---------------- DEVICE CONFIGURATION ----------------
-read_devfile
-
-if [[ -n "${arg_code_type}" ]]; then code_type="${arg_code_type}"; fi
-if [[ -n "${arg_code_length}" ]]; then code_length="${arg_code_length}"; fi
-if [[ -n "${arg_strategy}" ]]; then strategy="${arg_strategy}"; fi
-if [[ -n "${arg_command_profile}" ]]; then command_profile="${arg_command_profile}"; fi
-
-code_type=${code_type:-moto}
-code_length=${code_length:-${DEFAULT_CODE_LENGTH}}
-strategy=${strategy:-${DEFAULT_STRATEGY}}
-command_profile=${command_profile:-${DEFAULT_COMMAND_PROFILE}}
-known_positions=${known_positions:-}
-last_value=${last_value:-0}
-
-if [[ -n "${arg_start_code}" ]]; then
-  if [[ "${arg_start_code}" =~ ^[0-9]+$ ]]; then
-    last_value="${arg_start_code}"
-  else
-    warn "--start currently accepts numeric offset only. Using 0."
-    last_value=0
-  fi
-fi
-
-case "${code_type}" in
-  numeric) charset="${DIGITS}" ;;
-  alpha) charset="${UPPER_ALNUM}" ;;
-  moto) charset="${UPPER_ALNUM}" ;;
-  *) fail "Invalid code type: ${code_type}"; exit 1 ;;
-esac
-
-if [[ -n "${arg_patterns}" ]]; then
-  patterns="${arg_patterns}"
-elif [[ -n "${arg_pattern}" ]]; then
-  patterns="custom:${arg_pattern}:10:User-provided mask"
-elif [[ -z "${patterns}" && "${code_type}" == "moto" ]]; then
-  patterns="${BUILTIN_PATTERNS}"
-fi
-
-if [[ -n "${patterns}" ]]; then
-  split_patterns
-  for entry in "${pattern_entries[@]}"; do
-    IFS=':' read -r name mask weight note <<< "${entry}"
-    if ! validate_pattern "${mask}"; then
-      fail "Invalid pattern '${mask}' in entry '${entry}'"
-      exit 1
-    fi
-  done
-  ensure_pattern_offsets
-fi
-
-case "${strategy}" in
-  sequential|random|smart) ;;
-  *) fail "Invalid strategy: ${strategy}"; exit 1 ;;
-esac
-
-detect_unlock_command "${command_profile}"
-write_devfile
-
-section "RULE" "authorized use confirmation"
-echo "This script sends repeated fastboot unlock attempts to one connected device."
-echo "Use only on devices you own or are explicitly authorized to service."
-read -r -p "Type AUTHORIZED to continue: " auth_confirm
-if [[ "${auth_confirm}" != "AUTHORIZED" ]]; then
-  fail "Authorization not confirmed. Aborted."
-  exit 1
-fi
-
-trap 'write_devfile; echo -e "\nProgress saved. Resume with: '$0'"' EXIT SIGINT
-
-section "PLAN" "runtime profile"
-echo "Device:           ${device}"
-echo "State file:       ${devfile}"
-echo "Command:          $(command_label)"
-echo "Strategy:         ${strategy}"
-
-if command_needs_code; then
-  echo "Code type:        ${code_type}"
-  if [[ -n "${patterns}" ]]; then
-    echo "Pattern schedule: weighted priority"
-    split_patterns
-    for entry in "${pattern_entries[@]}"; do
-      IFS=':' read -r name mask weight note <<< "${entry}"
-      printf "  - %-22s mask=%-12s weight=%s space=%s\n" "${name}" "${mask}" "${weight}" "$(pattern_space "${mask}")"
     done
-  else
-    total_combinations=$(safe_total_combinations "${#charset}" "${code_length}")
-    echo "Length:           ${code_length}"
-    echo "Search space:     ${total_combinations}"
-  fi
-else
-  warn "Selected command does not take a code. Script will run it once, then device may ask for confirmation."
-fi
-
-echo "Press Ctrl+C to save progress."
-echo "------------------------------------------------------------"
-
-start_time=$(date +%s)
-attempts=0
-status_update_interval=10
-
-if ! command_needs_code; then
-  section "RUN" "starting no-code unlock command"
-  output=$(run_unlock_command "")
-  status=$?
-  echo "${output}"
-  if [[ ${status} -eq 0 ]] && ! is_fastboot_failure "${output}"; then
-    ok "Command sent. Confirm unlock on device screen if prompted."
-    exit 0
-  fi
-  fail "Unlock command failed."
-  exit 1
-fi
-
-section "RUN" "starting code attempts"
-
-while true; do
-  code=$(next_code)
-
-  if try_unlock "${code}"; then
-    echo -e "\n${GREEN}${BOLD}SUCCESS${RESET} unlock code: ${code}"
-    echo "${code}" > "${success_file}"
-    ok "Saved successful code to ${success_file}"
-    break
-  else
-    result=$?
-    if [[ ${result} -eq 2 ]]; then
-      echo -e "\n${RED}${BOLD}TERMINAL FASTBOOT ERROR${RESET}"
-      echo "${output}"
-      fail "Stopping. Command unsupported, OEM unlock disabled, carrier lock, or device policy block."
-      exit 1
-    fi
   fi
 
-  (( attempts++ ))
-  (( last_value++ ))
-  advance_pattern_offset
+  # Validate strategy
+  case "${CONFIG_STRATEGY}" in
+    smart|sequential|random) ;;
+    *)
+      ui_fail "Invalid search strategy '${CONFIG_STRATEGY}'. Valid: smart, sequential, random."
+      exit "${EXIT_GENERAL_ERROR}"
+      ;;
+  esac
 
-  if (( attempts % status_update_interval == 0 )); then
-    current_time=$(date +%s)
-    elapsed=$(( current_time - start_time ))
-    echo -ne "\033[K"
+  # Detect and resolve command profile
+  autodetect_unlock_command_profile "${CONFIG_COMMAND_PROFILE}"
 
-    if [[ -n "${patterns}" ]]; then
-      if [[ "${selected_pattern_space}" != "huge" ]]; then
-        progress_pct=$(percent_x1000 "${selected_pattern_offset}" "${selected_pattern_space}")
-      else
-        progress_pct="n/a"
-      fi
-      echo -ne "Trying: ${code} | Attempt: ${attempts} | Pattern: ${selected_pattern_name} (${selected_pattern_mask}) | Offset: ${selected_pattern_offset} | Pattern progress: ${progress_pct}% | Elapsed: ${elapsed}s\r"
-    else
-      total_combinations=$(safe_total_combinations "${#charset}" "${code_length}")
-      progress_pct=$(percent_x1000 "${last_value}" "${total_combinations}")
-      remaining=$(estimate_time "${last_value}" "${total_combinations}" "${elapsed}")
-      echo -ne "Trying: ${code} | Attempt: ${attempts} | Progress: ${progress_pct}% | Est. remaining: ${remaining}\r"
-    fi
-
-    if (( attempts % 100 == 0 )); then
-      write_devfile
-    fi
+  # Ensure pattern offsets initialization
+  if [[ -n "${CONFIG_PATTERNS}" ]]; then
+    IFS=';' read -ra p_entries <<< "${CONFIG_PATTERNS}"
+    IFS=',' read -ra o_entries <<< "${STATE_PATTERN_OFFSETS}"
+    local default_offsets="" i
+    for (( i=0; i<${#p_entries[@]}; i++ )); do
+      [[ $i -gt 0 ]] && default_offsets="${default_offsets},"
+      default_offsets="${default_offsets}${o_entries[$i]:-0}"
+    done
+    STATE_PATTERN_OFFSETS="${default_offsets}"
   fi
-done
 
-ok "Bootloader unlock complete."
-exit 0
+  # Persist resolved configuration
+  save_device_state "${TARGET_STATE_FILE}"
+
+  # Safe exit and signal handler
+  function handle_exit_cleanup {
+    local status_code=$?
+    trap - EXIT INT TERM
+    save_device_state "${TARGET_STATE_FILE}"
+    printf "\n%s[INFO]%s Progress safely persisted to %s\n" "${COLOR_CYAN}" "${STYLE_RESET}" "${TARGET_STATE_FILE}"
+    exit "${status_code}"
+  }
+  trap handle_exit_cleanup EXIT INT TERM
+
+  # Display plan & prompt confirmation
+  display_runtime_summary
+  prompt_authorization_guard
+
+  # Execute flow
+  if ! profile_requires_code_generation "${STATE_RESOLVED_COMMAND}"; then
+    execute_direct_command_flow
+  fi
+
+  execute_candidate_search_loop
+}
+
+main "$@"

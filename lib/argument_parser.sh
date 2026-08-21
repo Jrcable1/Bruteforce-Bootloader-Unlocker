@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# argument_parser.sh - CLI argument parsing, input validation, and help guide
+# ==============================================================================
+
+[[ -n "${ARGUMENT_PARSER_INCLUDED:-}" ]] && return 0
+readonly ARGUMENT_PARSER_INCLUDED=1
+
+function display_usage_guide {
+  printf "%s%sFastboot Bootloader Unlock Console%s\n\n" "${COLOR_CYAN}" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "%sUsage:%s %s [options]\n\n" "${STYLE_BOLD}" "${STYLE_RESET}" "$0"
+
+  printf "%sCore Options:%s\n" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "  %s-h, --help%s                 Display this help guide and exit\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s-d, --device <id>%s          Target fastboot device identifier (default: auto-detect)\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s-c, --command <profile>%s    Command profile: auto, flashing-unlock, flashing-unlock-code,\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "                             oem-unlock-code, oem-unlock, oem-unlock-go (default: auto)\n"
+  printf "  %s--strategy <strategy>%s      Candidate order: smart, sequential, random (default: smart)\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s-s, --start <offset>%s       Resume or start from numeric offset (default: 0)\n\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+
+  printf "%sPattern DSL Options:%s\n" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "  %s-p, --pattern <mask>%s       Apply single pattern mask, e.g. 'X{20}', 'A{19}9', '9{6}'\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s--patterns <schedule>%s      Semicolon-delimited list: name:mask:weight;name:mask:weight\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s--list-patterns%s            Display built-in pattern profiles and priority schedule\n\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+
+  printf "%sLegacy Options:%s\n" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "  %s-t, --type <type>%s          Legacy charset alias: moto, alpha, numeric (default: moto)\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s-l, --length <num>%s         Code length for generic search (default: 20)\n\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+
+  printf "%sPattern DSL Tokens:%s\n" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "  %s9%s   Numeric digit             0-9\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sA%s   Uppercase alphabetic      A-Z\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sa%s   Lowercase alphabetic      a-z\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sX%s   Uppercase alphanumeric    A-Z, 0-9\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sx%s   Mixed alphanumeric        A-Z, a-z, 0-9\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sH%s   Uppercase hexadecimal     0-9, A-F\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sh%s   Lowercase hexadecimal     0-9, a-f\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %s?%s   Active charset symbol     Selected by --type\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %s{n}%s Repeat multiplier         e.g. A{4}9A{15}, X{20}, 9{6}\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %s*%s   Literal characters        Hyphens, colons, or separators preserved (e.g. XXXX-XXXX)\n\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+
+  printf "%sExamples:%s\n" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "  %s --command auto --strategy smart\n" "$0"
+  printf "  %s --pattern 'X{20}' --command oem-unlock-code\n" "$0"
+  printf "  %s --patterns 'moto:X{20}:10;pin6:9{6}:1' --device ZY2234ABCD\n" "$0"
+}
+
+function display_builtin_patterns {
+  printf "%s%sBuilt-in pattern profiles (highest priority first):%s\n\n" "${COLOR_CYAN}" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "  %-22s %-12s %-8s %s\n" "PROFILE NAME" "MASK" "WEIGHT" "DESCRIPTION"
+  printf "  %-22s %-12s %-8s %s\n" "------------" "----" "------" "-----------"
+
+  IFS=';' read -ra entries <<< "${BUILTIN_PATTERN_PROFILES}"
+  for entry in "${entries[@]}"; do
+    IFS=':' read -r name mask weight desc <<< "${entry}"
+    printf "  %-22s %-12s %-8s %s\n" "${name}" "${mask}" "${weight}" "${desc}"
+  done
+}
+
+function parse_cli_arguments {
+  CLI_DEVICE_OVERRIDE=""
+  CLI_CODE_TYPE=""
+  CLI_CODE_LENGTH=""
+  CLI_START_OFFSET=""
+  CLI_SINGLE_PATTERN=""
+  CLI_PATTERN_SCHEDULE=""
+  CLI_STRATEGY=""
+  CLI_COMMAND_PROFILE=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        display_usage_guide
+        exit "${EXIT_SUCCESS}"
+        ;;
+      --list-patterns)
+        display_builtin_patterns
+        exit "${EXIT_SUCCESS}"
+        ;;
+      -d|--device)
+        [[ -z "${2:-}" ]] && { ui_fail "Missing value for --device"; exit "${EXIT_GENERAL_ERROR}"; }
+        CLI_DEVICE_OVERRIDE="$2"; shift 2 ;;
+      -t|--type)
+        [[ -z "${2:-}" ]] && { ui_fail "Missing value for --type"; exit "${EXIT_GENERAL_ERROR}"; }
+        case "$2" in
+          numeric|alpha|moto) CLI_CODE_TYPE="$2" ;;
+          *) ui_fail "Invalid --type '$2'. Allowed values: numeric, alpha, moto."; exit "${EXIT_GENERAL_ERROR}" ;;
+        esac
+        shift 2 ;;
+      -l|--length)
+        [[ -z "${2:-}" ]] && { ui_fail "Missing value for --length"; exit "${EXIT_GENERAL_ERROR}"; }
+        if [[ ! "$2" =~ ^[0-9]+$ ]] || [[ "$2" -le 0 ]]; then
+          ui_fail "Invalid --length '$2'. Must be a positive integer."
+          exit "${EXIT_GENERAL_ERROR}"
+        fi
+        CLI_CODE_LENGTH="$2"; shift 2 ;;
+      -s|--start)
+        [[ -z "${2:-}" ]] && { ui_fail "Missing value for --start"; exit "${EXIT_GENERAL_ERROR}"; }
+        if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+          ui_fail "Invalid --start '$2'. Must be a non-negative integer offset."
+          exit "${EXIT_GENERAL_ERROR}"
+        fi
+        CLI_START_OFFSET="$2"; shift 2 ;;
+      -p|--pattern)
+        [[ -z "${2:-}" ]] && { ui_fail "Missing value for --pattern"; exit "${EXIT_GENERAL_ERROR}"; }
+        CLI_SINGLE_PATTERN="$2"; shift 2 ;;
+      --patterns)
+        [[ -z "${2:-}" ]] && { ui_fail "Missing value for --patterns"; exit "${EXIT_GENERAL_ERROR}"; }
+        CLI_PATTERN_SCHEDULE="$2"; shift 2 ;;
+      --strategy)
+        [[ -z "${2:-}" ]] && { ui_fail "Missing value for --strategy"; exit "${EXIT_GENERAL_ERROR}"; }
+        case "$2" in
+          smart|sequential|random) CLI_STRATEGY="$2" ;;
+          *) ui_fail "Invalid --strategy '$2'. Allowed values: smart, sequential, random."; exit "${EXIT_GENERAL_ERROR}" ;;
+        esac
+        shift 2 ;;
+      -c|--command)
+        [[ -z "${2:-}" ]] && { ui_fail "Missing value for --command"; exit "${EXIT_GENERAL_ERROR}"; }
+        case "$2" in
+          auto|flashing-unlock|flashing-unlock-code|oem-unlock-code|oem-unlock|oem-unlock-go) CLI_COMMAND_PROFILE="$2" ;;
+          *) ui_fail "Invalid --command '$2'. Allowed values: auto, flashing-unlock, flashing-unlock-code, oem-unlock-code, oem-unlock, oem-unlock-go."; exit "${EXIT_GENERAL_ERROR}" ;;
+        esac
+        shift 2 ;;
+      *)
+        ui_fail "Unknown argument: $1"
+        printf "Run '%s --help' for available options.\n" "$0"
+        exit "${EXIT_GENERAL_ERROR}"
+        ;;
+    esac
+  done
+}

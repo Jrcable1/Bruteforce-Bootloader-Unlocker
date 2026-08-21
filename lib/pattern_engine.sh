@@ -57,9 +57,32 @@ function get_charset_for_symbol {
 }
 
 function validate_pattern_mask {
-  local mask=$1 expanded
-  expanded=$(expand_pattern_mask "${mask}")
-  [[ -z "${expanded}" ]] && return 1
+  local mask=$1 i=0 char j num_str
+  [[ -z "${mask}" ]] && return 1
+
+  while (( i < ${#mask} )); do
+    char="${mask:i:1}"
+    if [[ "${char}" == "{" ]]; then
+      return 1
+    fi
+    if [[ "${mask:i+1:1}" == "{" ]]; then
+      j=$(( i + 2 ))
+      num_str=""
+      while (( j < ${#mask} )) && [[ "${mask:j:1}" != "}" ]]; do
+        num_str="${num_str}${mask:j:1}"
+        j=$(( j + 1 ))
+      done
+      if (( j >= ${#mask} )) || [[ "${mask:j:1}" != "}" ]]; then
+        return 1
+      fi
+      if [[ ! "${num_str}" =~ ^[0-9]+$ || "${num_str}" -le 0 ]]; then
+        return 1
+      fi
+      i="${j}"
+    fi
+    i=$(( i + 1 ))
+  done
+
   return 0
 }
 

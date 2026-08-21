@@ -57,6 +57,15 @@ function display_builtin_patterns {
   done
 }
 
+function validate_numeric_64bit {
+  local num=$1
+  local max_64="9223372036854775807"
+  if [[ ! "${num}" =~ ^[0-9]+$ ]]; then return 1; fi
+  if (( ${#num} > ${#max_64} )); then return 1; fi
+  if (( ${#num} == ${#max_64} )) && [[ "${num}" > "${max_64}" ]]; then return 1; fi
+  return 0
+}
+
 function parse_cli_arguments {
   CLI_DEVICE_OVERRIDE=""
   CLI_CODE_TYPE=""
@@ -89,16 +98,16 @@ function parse_cli_arguments {
         shift 2 ;;
       -l|--length)
         [[ -z "${2:-}" ]] && { ui_fail "Missing value for --length"; exit "${EXIT_GENERAL_ERROR}"; }
-        if [[ ! "$2" =~ ^[0-9]+$ ]] || [[ "$2" -le 0 ]]; then
-          ui_fail "Invalid --length '$2'. Must be a positive integer."
-          exit "${EXIT_GENERAL_ERROR}"
+        if ! validate_numeric_64bit "$2" || [[ "$2" -le 0 || "$2" -gt 4096 ]]; then
+          ui_fail "Invalid --length '$2'. Must be a positive integer between 1 and 4096."
+          exit "${EXIT_GENERAL_ERROR}";
         fi
         CLI_CODE_LENGTH="$2"; shift 2 ;;
       -s|--start)
         [[ -z "${2:-}" ]] && { ui_fail "Missing value for --start"; exit "${EXIT_GENERAL_ERROR}"; }
-        if [[ ! "$2" =~ ^[0-9]+$ ]]; then
-          ui_fail "Invalid --start '$2'. Must be a non-negative integer offset."
-          exit "${EXIT_GENERAL_ERROR}"
+        if ! validate_numeric_64bit "$2"; then
+          ui_fail "Invalid --start '$2'. Must be a non-negative 64-bit integer offset."
+          exit "${EXIT_GENERAL_ERROR}";
         fi
         CLI_START_OFFSET="$2"; shift 2 ;;
       -p|--pattern)

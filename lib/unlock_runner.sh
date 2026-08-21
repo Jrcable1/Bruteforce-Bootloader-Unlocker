@@ -7,12 +7,14 @@
 readonly UNLOCK_RUNNER_INCLUDED=1
 
 function format_percentage_string {
-  local current=$1 total=$2
+  local current=$1 total=$2 whole frac
   if [[ "${total}" == "huge" || ! "${total}" =~ ^[0-9]+$ || "${total}" -le 0 ]]; then
     printf "n/a"
     return 0
   fi
-  printf "%d.%03d" $(( current * 100 / total )) $(( current * 100000 / total % 1000 ))
+  whole=$(( current * 100 / total ))
+  frac=$(( (current * 100 % total) * 1000 / total ))
+  printf "%d.%03d" "${whole}" "${frac}"
 }
 
 function format_time_estimate {
@@ -26,6 +28,11 @@ function format_time_estimate {
   rate=$(( current / elapsed ))
   if [[ ${rate} -le 0 ]]; then
     printf "calculating"
+    return 0
+  fi
+
+  if (( current >= total )); then
+    printf "0s"
     return 0
   fi
 

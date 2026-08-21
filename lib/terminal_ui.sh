@@ -6,8 +6,12 @@
 [[ -n "${TERMINAL_UI_INCLUDED:-}" ]] && return 0
 readonly TERMINAL_UI_INCLUDED=1
 
+function terminal_stdout_is_tty {
+  [[ -t 1 ]]
+}
+
 function init_terminal_styles {
-  if [[ ! -t 1 || -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" ]]; then
+  if ! terminal_stdout_is_tty || [[ -n "${NO_COLOR:-}" || "${TERM:-}" == "dumb" ]]; then
     STYLE_BOLD=""
     STYLE_DIM=""
     STYLE_RESET=""
@@ -37,7 +41,7 @@ init_terminal_styles
 
 function get_terminal_width {
   local cols
-  if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
+  if terminal_stdout_is_tty && command -v tput >/dev/null 2>&1; then
     cols=$(tput cols 2>/dev/null)
     if [[ "${cols}" =~ ^[0-9]+$ && "${cols}" -ge 40 ]]; then
       printf "%s" "${cols}"

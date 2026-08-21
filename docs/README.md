@@ -115,6 +115,24 @@ Legacy Options:
 - [Pattern DSL Grammar & Search Space](docs/PATTERN_DSL.md)
 - [Fastboot Command Profiles](docs/COMMAND_PROFILES.md)
 - [Design System & Terminal UI](docs/DESIGN.md)
+- [Automated Testing Framework](docs/TESTING.md)
+
+---
+
+## Running Tests
+
+The test suite requires only Bash and standard coreutils (no external test runner dependencies):
+
+```bash
+# Run all syntax checks, unit tests, and integration tests
+bash tests/run_all_tests.sh
+
+# Run a specific unit test file
+bash tests/unit/test_pattern_engine.sh
+
+# Run with test filter
+bash tests/run_all_tests.sh fastboot
+```
 
 ---
 

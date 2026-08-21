@@ -102,8 +102,15 @@ function main {
   # Persist resolved configuration
   save_device_state "${TARGET_STATE_FILE}"
 
-  # Set safe exit/signal trap
-  trap 'save_device_state "${TARGET_STATE_FILE}"; printf "\n%s[INFO]%s Progress safely saved to %s.\n" "${COLOR_CYAN}" "${STYLE_RESET}" "${TARGET_STATE_FILE}"' EXIT INT TERM
+  # Safe exit and signal handler
+  function handle_exit_cleanup {
+    local status_code=$?
+    trap - EXIT INT TERM
+    save_device_state "${TARGET_STATE_FILE}"
+    printf "\n%s[INFO]%s Progress safely persisted to %s\n" "${COLOR_CYAN}" "${STYLE_RESET}" "${TARGET_STATE_FILE}"
+    exit "${status_code}"
+  }
+  trap handle_exit_cleanup EXIT INT TERM
 
   # Display plan & prompt confirmation
   display_runtime_summary

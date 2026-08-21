@@ -82,12 +82,24 @@ function parse_cli_arguments {
         CLI_DEVICE_OVERRIDE="$2"; shift 2 ;;
       -t|--type)
         [[ -z "${2:-}" ]] && { ui_fail "Missing value for --type"; exit "${EXIT_GENERAL_ERROR}"; }
-        CLI_CODE_TYPE="$2"; shift 2 ;;
+        case "$2" in
+          numeric|alpha|moto) CLI_CODE_TYPE="$2" ;;
+          *) ui_fail "Invalid --type '$2'. Allowed values: numeric, alpha, moto."; exit "${EXIT_GENERAL_ERROR}" ;;
+        esac
+        shift 2 ;;
       -l|--length)
         [[ -z "${2:-}" ]] && { ui_fail "Missing value for --length"; exit "${EXIT_GENERAL_ERROR}"; }
+        if [[ ! "$2" =~ ^[0-9]+$ ]] || [[ "$2" -le 0 ]]; then
+          ui_fail "Invalid --length '$2'. Must be a positive integer."
+          exit "${EXIT_GENERAL_ERROR}"
+        fi
         CLI_CODE_LENGTH="$2"; shift 2 ;;
       -s|--start)
         [[ -z "${2:-}" ]] && { ui_fail "Missing value for --start"; exit "${EXIT_GENERAL_ERROR}"; }
+        if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+          ui_fail "Invalid --start '$2'. Must be a non-negative integer offset."
+          exit "${EXIT_GENERAL_ERROR}"
+        fi
         CLI_START_OFFSET="$2"; shift 2 ;;
       -p|--pattern)
         [[ -z "${2:-}" ]] && { ui_fail "Missing value for --pattern"; exit "${EXIT_GENERAL_ERROR}"; }
@@ -97,10 +109,18 @@ function parse_cli_arguments {
         CLI_PATTERN_SCHEDULE="$2"; shift 2 ;;
       --strategy)
         [[ -z "${2:-}" ]] && { ui_fail "Missing value for --strategy"; exit "${EXIT_GENERAL_ERROR}"; }
-        CLI_STRATEGY="$2"; shift 2 ;;
+        case "$2" in
+          smart|sequential|random) CLI_STRATEGY="$2" ;;
+          *) ui_fail "Invalid --strategy '$2'. Allowed values: smart, sequential, random."; exit "${EXIT_GENERAL_ERROR}" ;;
+        esac
+        shift 2 ;;
       -c|--command)
         [[ -z "${2:-}" ]] && { ui_fail "Missing value for --command"; exit "${EXIT_GENERAL_ERROR}"; }
-        CLI_COMMAND_PROFILE="$2"; shift 2 ;;
+        case "$2" in
+          auto|flashing-unlock|flashing-unlock-code|oem-unlock-code|oem-unlock|oem-unlock-go) CLI_COMMAND_PROFILE="$2" ;;
+          *) ui_fail "Invalid --command '$2'. Allowed values: auto, flashing-unlock, flashing-unlock-code, oem-unlock-code, oem-unlock, oem-unlock-go."; exit "${EXIT_GENERAL_ERROR}" ;;
+        esac
+        shift 2 ;;
       *)
         ui_fail "Unknown argument: $1"
         printf "Run '%s --help' for available options.\n" "$0"

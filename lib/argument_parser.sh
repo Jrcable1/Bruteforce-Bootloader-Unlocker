@@ -7,49 +7,46 @@
 readonly ARGUMENT_PARSER_INCLUDED=1
 
 function display_usage_guide {
-  cat <<EOF
-Fastboot Bootloader Unlock Console
+  printf "%s%sFastboot Bootloader Unlock Console%s\n\n" "${COLOR_CYAN}" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "%sUsage:%s %s [options]\n\n" "${STYLE_BOLD}" "${STYLE_RESET}" "$0"
 
-Usage: $0 [options]
+  printf "%sCore Options:%s\n" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "  %s-h, --help%s                 Display this help guide and exit\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s-d, --device <id>%s          Target fastboot device identifier (default: auto-detect)\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s-c, --command <profile>%s    Command profile: auto, flashing-unlock, flashing-unlock-code,\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "                             oem-unlock-code, oem-unlock, oem-unlock-go (default: auto)\n"
+  printf "  %s--strategy <strategy>%s      Candidate order: smart, sequential, random (default: smart)\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s-s, --start <offset>%s       Resume or start from numeric offset (default: 0)\n\n" "${COLOR_CYAN}" "${STYLE_RESET}"
 
-Core Options:
-  -h, --help                 Display this help guide and exit
-  -d, --device <id>          Target fastboot device identifier (default: auto-detect)
-  -c, --command <profile>    Command profile: auto, flashing-unlock, flashing-unlock-code,
-                             oem-unlock-code, oem-unlock, oem-unlock-go (default: auto)
-  --strategy <strategy>      Candidate order: smart, sequential, random (default: smart)
-  -s, --start <offset>       Resume or start from numeric offset (default: 0)
+  printf "%sPattern DSL Options:%s\n" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "  %s-p, --pattern <mask>%s       Apply single pattern mask, e.g. 'X{20}', 'A{19}9', '9{6}'\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s--patterns <schedule>%s      Semicolon-delimited list: name:mask:weight;name:mask:weight\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s--list-patterns%s            Display built-in pattern profiles and priority schedule\n\n" "${COLOR_CYAN}" "${STYLE_RESET}"
 
-Pattern DSL Options:
-  -p, --pattern <mask>       Apply single pattern mask, e.g. 'X{20}', 'A{19}9', '9{6}'
-  --patterns <schedule>      Semicolon-delimited list: name:mask:weight;name:mask:weight
-  --list-patterns            Display built-in pattern profiles and priority schedule
+  printf "%sLegacy Options:%s\n" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "  %s-t, --type <type>%s          Legacy charset alias: moto, alpha, numeric (default: moto)\n" "${COLOR_CYAN}" "${STYLE_RESET}"
+  printf "  %s-l, --length <num>%s         Code length for generic search (default: 20)\n\n" "${COLOR_CYAN}" "${STYLE_RESET}"
 
-Legacy Options:
-  -t, --type <type>          Legacy charset alias: moto, alpha, numeric (default: moto)
-  -l, --length <num>         Code length for generic search (default: 20)
+  printf "%sPattern DSL Tokens:%s\n" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "  %s9%s   Numeric digit             0-9\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sA%s   Uppercase alphabetic      A-Z\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sa%s   Lowercase alphabetic      a-z\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sX%s   Uppercase alphanumeric    A-Z, 0-9\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sx%s   Mixed alphanumeric        A-Z, a-z, 0-9\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sH%s   Uppercase hexadecimal     0-9, A-F\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %sh%s   Lowercase hexadecimal     0-9, a-f\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %s?%s   Active charset symbol     Selected by --type\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %s{n}%s Repeat multiplier         e.g. A{4}9A{15}, X{20}, 9{6}\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
+  printf "  %s*%s   Literal characters        Hyphens, colons, or separators preserved (e.g. XXXX-XXXX)\n\n" "${COLOR_YELLOW}" "${STYLE_RESET}"
 
-Pattern DSL Tokens:
-  9   Numeric digit             0-9
-  A   Uppercase alphabetic      A-Z
-  a   Lowercase alphabetic      a-z
-  X   Uppercase alphanumeric    A-Z, 0-9
-  x   Mixed alphanumeric        A-Z, a-z, 0-9
-  H   Uppercase hexadecimal     0-9, A-F
-  h   Lowercase hexadecimal     0-9, a-f
-  ?   Active charset symbol     Selected by --type
-  {n} Repeat multiplier         e.g. A{4}9A{15}, X{20}, 9{6}
-  *   Literal characters        Hyphens, colons, or separators preserved (e.g. XXXX-XXXX)
-
-Examples:
-  $0 --command auto --strategy smart
-  $0 --pattern 'X{20}' --command oem-unlock-code
-  $0 --patterns 'moto:X{20}:10;pin6:9{6}:1' --device ZY2234ABCD
-EOF
+  printf "%sExamples:%s\n" "${STYLE_BOLD}" "${STYLE_RESET}"
+  printf "  %s --command auto --strategy smart\n" "$0"
+  printf "  %s --pattern 'X{20}' --command oem-unlock-code\n" "$0"
+  printf "  %s --patterns 'moto:X{20}:10;pin6:9{6}:1' --device ZY2234ABCD\n" "$0"
 }
 
 function display_builtin_patterns {
-  printf "Built-in pattern profiles (highest priority first):\n\n"
+  printf "%s%sBuilt-in pattern profiles (highest priority first):%s\n\n" "${COLOR_CYAN}" "${STYLE_BOLD}" "${STYLE_RESET}"
   printf "  %-22s %-12s %-8s %s\n" "PROFILE NAME" "MASK" "WEIGHT" "DESCRIPTION"
   printf "  %-22s %-12s %-8s %s\n" "------------" "----" "------" "-----------"
 
